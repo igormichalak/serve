@@ -27,7 +27,12 @@ func (bw *bufferedResponseWriter) WriteHeader(statusCode int) {
 	bw.status = statusCode
 }
 
-func (bw *bufferedResponseWriter) flush() error {
+func (bw *bufferedResponseWriter) Flush() {
+	flusher := bw.ResponseWriter.(http.Flusher)
+	flusher.Flush()
+}
+
+func (bw *bufferedResponseWriter) customFlush() error {
 	bw.ResponseWriter.WriteHeader(bw.status)
 	_, err := bw.ResponseWriter.Write(bw.buf.Bytes())
 	return err

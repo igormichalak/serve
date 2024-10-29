@@ -20,6 +20,8 @@ import (
 const DefaultPort = "8080"
 const HTMLContentType = "text/html"
 
+var reloadBroadcaster = newBroadcaster()
+
 const InjectionTmplString = `<script>
     const sse = new EventSource('http://localhost:{{.Port}}/sse');
 	sse.onerror = e => console.error('EventSource failed:', e);
@@ -66,7 +68,7 @@ func injectReloadMiddleware(next http.Handler, injection string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bw := newBufferedResponseWriter(w)
 		defer func() {
-			if err := bw.flush(); err != nil {
+			if err := bw.customFlush(); err != nil {
 				serverError(w, err)
 			}
 		}()
@@ -96,18 +98,31 @@ func injectReloadMiddleware(next http.Handler, injection string) http.Handler {
 	})
 }
 
+func formatSSE(event, data string) string {
+	return fmt.Sprintf("event: %s\ndata: %s\n\n", event, data)
+}
+
 func liveReloadHandler(w http.ResponseWriter, r *http.Request) {
-	// flusher := w.(http.Flusher)
+	flusher := w.(http.Flusher)
 
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 
+	ch := reloadBroadcaster.subscribe()
+	defer reloadBroadcaster.unsubscribe(ch)
+
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-ch:
+			msg := formatSSE("sourcechange", "{}")
+			if _, err := fmt.Fprint(w, msg); err != nil {
+				return
+			}
+			flusher.Flush()
 		}
 	}
 }
@@ -163,18 +178,19 @@ func main() {
 	mux := http.NewServeMux()
 
 	fileServer := http.FileServerFS(os.DirFS(dir))
-	mux.Handle("GET /", fileServer)
 
 	var topHandler http.Handler
 
 	if injectReload {
-		mux.HandleFunc("GET /sse", liveReloadHandler)
 		var sb strings.Builder
 		if err := InjectionTmpl.Execute(&sb, InjectionParams{Port: port}); err != nil {
 			panic(err)
 		}
-		topHandler = noCacheMiddleware(injectReloadMiddleware(mux, sb.String()))
+		mux.HandleFunc("GET /sse", liveReloadHandler)
+		mux.Handle("GET /", injectReloadMiddleware(fileServer, sb.String()))
+		topHandler = noCacheMiddleware(mux)
 	} else {
+		mux.Handle("GET /", fileServer)
 		topHandler = mux
 	}
 
