@@ -38,6 +38,10 @@ const InjectionTmplString = `<script>
 
 var InjectionTmpl = template.Must(template.New("sse").Parse(InjectionTmplString))
 
+type InjectionParams struct {
+	Port string
+}
+
 type bufferedResponseWriter struct {
 	http.ResponseWriter
 	buf    bytes.Buffer
@@ -87,7 +91,7 @@ func noCacheMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func injectReloadMiddleware(next http.Handler) http.Handler {
+func injectReloadMiddleware(next http.Handler, injection string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bw := newBufferedResponseWriter(w)
 		defer func() {
@@ -98,26 +102,24 @@ func injectReloadMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(bw, r)
 
+		if r.Header.Get("Range") != "" {
+			return
+		}
 		if !strings.Contains(bw.Header().Get("Content-Type"), HTMLContentType) {
 			return
 		}
 
-		var sb strings.Builder
-		err := InjectionTmpl.Execute(&sb, struct {
-			Port string
-		}{Port: DefaultPort})
+		htmlStr := strings.ReplaceAll(bw.buf.String(), "</body>", injection+"</body>")
 
-		if err != nil {
-			serverError(w, err)
-			return
+		if contentLength := bw.Header().Get("Content-Length"); contentLength != "" {
+			n, err := strconv.Atoi(contentLength)
+			if err != nil {
+				panic(err)
+			}
+			bw.Header().Set("Content-Length", strconv.Itoa(n+len(injection)))
 		}
 
-		htmlStr := strings.ReplaceAll(bw.buf.String(), "</body>", fmt.Sprintf("%s</body>", sb.String()))
-		byteResponse := []byte(htmlStr)
-
-		bw.Header().Set("Content-Length", strconv.Itoa(len(byteResponse)))
-
-		if _, err := bw.Write(byteResponse); err != nil {
+		if _, err := fmt.Fprint(bw, htmlStr); err != nil {
 			serverError(w, err)
 		}
 	})
@@ -129,7 +131,6 @@ func liveReloadHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(http.StatusOK)
 
 	for {
@@ -160,7 +161,7 @@ func main() {
 
 	dir := flag.Arg(0)
 
-	if len(dir) == 0 {
+	if dir == "" {
 		fmt.Println("please specify the root directory.")
 		os.Exit(1)
 	}
@@ -192,11 +193,16 @@ func main() {
 
 	fileServer := http.FileServerFS(os.DirFS(dir))
 	mux.Handle("GET /", fileServer)
-	mux.HandleFunc("GET /sse", liveReloadHandler)
 
 	var topHandler http.Handler
+
 	if injectReload {
-		topHandler = noCacheMiddleware(injectReloadMiddleware(mux))
+		mux.HandleFunc("GET /sse", liveReloadHandler)
+		var sb strings.Builder
+		if err := InjectionTmpl.Execute(&sb, InjectionParams{Port: port}); err != nil {
+			panic(err)
+		}
+		topHandler = noCacheMiddleware(injectReloadMiddleware(mux, sb.String()))
 	} else {
 		topHandler = mux
 	}
