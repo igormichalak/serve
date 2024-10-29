@@ -10,11 +10,33 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"strconv"
+	"strings"
 	"syscall"
+	"text/template"
 	"time"
 )
 
 const DefaultPort = "8080"
+const HTMLContentType = "text/html"
+
+const InjectionTmplString = `<script>
+    const sse = new EventSource('http://localhost:{{.Port}}/sse');
+	sse.onerror = e => console.error('EventSource failed:', e);
+    sse.addEventListener('sourcechange', () => {
+        sse.close();
+		if (document.hidden) {
+			document.addEventListener('visibilitychange', () => {
+				if (!document.hidden) window.location.reload();
+		    });
+		} else {
+        	window.location.reload();
+		}
+    });
+</script>`
+
+var InjectionTmpl = template.Must(template.New("sse").Parse(InjectionTmplString))
 
 type bufferedResponseWriter struct {
 	http.ResponseWriter
@@ -44,6 +66,20 @@ func (bw *bufferedResponseWriter) flush() error {
 	return err
 }
 
+func serverError(w http.ResponseWriter, err error) {
+	fmt.Printf("server error: %v\n", err)
+	var body string
+
+	if os.Getenv("DEBUG") == "1" || os.Getenv("DEBUG") == "true" {
+		trace := string(debug.Stack())
+		body = fmt.Sprintf("%s\n%s", err, trace)
+	} else {
+		body = http.StatusText(http.StatusInternalServerError)
+	}
+
+	http.Error(w, body, http.StatusInternalServerError)
+}
+
 func noCacheMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -54,9 +90,54 @@ func noCacheMiddleware(next http.Handler) http.Handler {
 func injectReloadMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bw := newBufferedResponseWriter(w)
+		defer func() {
+			if err := bw.flush(); err != nil {
+				serverError(w, err)
+			}
+		}()
+
 		next.ServeHTTP(bw, r)
-		_ = bw.flush()
+
+		if !strings.Contains(bw.Header().Get("Content-Type"), HTMLContentType) {
+			return
+		}
+
+		var sb strings.Builder
+		err := InjectionTmpl.Execute(&sb, struct {
+			Port string
+		}{Port: DefaultPort})
+
+		if err != nil {
+			serverError(w, err)
+			return
+		}
+
+		htmlStr := strings.ReplaceAll(bw.buf.String(), "</body>", fmt.Sprintf("%s</body>", sb.String()))
+		byteResponse := []byte(htmlStr)
+
+		bw.Header().Set("Content-Length", strconv.Itoa(len(byteResponse)))
+
+		if _, err := bw.Write(byteResponse); err != nil {
+			serverError(w, err)
+		}
 	})
+}
+
+func liveReloadHandler(w http.ResponseWriter, r *http.Request) {
+	// flusher := w.(http.Flusher)
+
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.WriteHeader(http.StatusOK)
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 func main() {
@@ -107,13 +188,17 @@ func main() {
 		addr = fmt.Sprintf("localhost:%s", port)
 	}
 
+	mux := http.NewServeMux()
+
 	fileServer := http.FileServerFS(os.DirFS(dir))
+	mux.Handle("GET /", fileServer)
+	mux.HandleFunc("GET /sse", liveReloadHandler)
 
 	var topHandler http.Handler
 	if injectReload {
-		topHandler = noCacheMiddleware(injectReloadMiddleware(fileServer))
+		topHandler = noCacheMiddleware(injectReloadMiddleware(mux))
 	} else {
-		topHandler = fileServer
+		topHandler = mux
 	}
 
 	srv := &http.Server{
