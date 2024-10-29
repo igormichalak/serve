@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -15,16 +16,57 @@ import (
 
 const DefaultPort = "8080"
 
+type bufferedResponseWriter struct {
+	http.ResponseWriter
+	buf    bytes.Buffer
+	status int
+}
+
+func newBufferedResponseWriter(w http.ResponseWriter) *bufferedResponseWriter {
+	return &bufferedResponseWriter{ResponseWriter: w, status: http.StatusOK}
+}
+
+func (bw *bufferedResponseWriter) Write(b []byte) (int, error) {
+	if bw.status == 0 {
+		bw.status = http.StatusOK
+	}
+	bw.buf.Reset()
+	return bw.buf.Write(b)
+}
+
+func (bw *bufferedResponseWriter) WriteHeader(statusCode int) {
+	bw.status = statusCode
+}
+
+func (bw *bufferedResponseWriter) flush() error {
+	bw.ResponseWriter.WriteHeader(bw.status)
+	_, err := bw.ResponseWriter.Write(bw.buf.Bytes())
+	return err
+}
+
+func noCacheMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func injectReloadMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bw := newBufferedResponseWriter(w)
+		next.ServeHTTP(bw, r)
+		_ = bw.flush()
+	})
+}
+
 func main() {
 	var port string
 	var expose bool
-	// var webMode bool
-	// var injectReload bool
+	var injectReload bool
 
 	flag.StringVar(&port, "port", DefaultPort, "HTTP server port")
 	flag.BoolVar(&expose, "expose", false, "expose the server to all interfaces")
-	// flag.BoolVar(&webMode, "web", false, "serve index.html at path roots")
-	// flag.BoolVar(&injectReload, "reload", false, "inject auto reload into HTML files")
+	flag.BoolVar(&injectReload, "reload", false, "inject auto reload into HTML files")
 	flag.Parse()
 
 	for _, c := range port {
@@ -67,9 +109,16 @@ func main() {
 
 	fileServer := http.FileServerFS(os.DirFS(dir))
 
+	var topHandler http.Handler
+	if injectReload {
+		topHandler = noCacheMiddleware(injectReloadMiddleware(fileServer))
+	} else {
+		topHandler = fileServer
+	}
+
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           fileServer,
+		Handler:           topHandler,
 		ReadTimeout:       6 * time.Second,
 		ReadHeaderTimeout: 2 * time.Second,
 		WriteTimeout:      12 * time.Second,
