@@ -24,3 +24,13 @@ echo "$(go env GOPATH)/bin"
 ```
 
 More info: https://go.dev/wiki/GOPATH
+
+## Usage
+
+```bash
+Usage of serve:
+  -expose
+    	expose the server to all interfaces
+  -port string
+    	HTTP server port (default "8080")
+```
