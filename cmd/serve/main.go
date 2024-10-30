@@ -145,8 +145,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	dir := flag.Arg(0)
+	var injectionSB strings.Builder
+	if err := InjectionTmpl.Execute(&injectionSB, InjectionParams{Port: port}); err != nil {
+		panic(err)
+	}
+	injection := injectionSB.String()
 
+	dir := flag.Arg(0)
 	if dir == "" {
 		fmt.Println("please specify the root directory.")
 		os.Exit(1)
@@ -168,6 +173,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	mux := http.NewServeMux()
+	fileServer := http.FileServerFS(os.DirFS(dir))
+	var handler http.Handler
+
+	if injectReload {
+		mux.Handle("GET /", injectReloadMiddleware(fileServer, injection))
+		mux.HandleFunc("GET /sse", liveReloadHandler)
+		handler = noCacheMiddleware(mux)
+	} else {
+		mux.Handle("GET /", fileServer)
+		handler = mux
+	}
+
 	var addr string
 	if expose {
 		addr = fmt.Sprintf(":%s", port)
@@ -175,28 +193,9 @@ func main() {
 		addr = fmt.Sprintf("localhost:%s", port)
 	}
 
-	mux := http.NewServeMux()
-
-	fileServer := http.FileServerFS(os.DirFS(dir))
-
-	var topHandler http.Handler
-
-	if injectReload {
-		var sb strings.Builder
-		if err := InjectionTmpl.Execute(&sb, InjectionParams{Port: port}); err != nil {
-			panic(err)
-		}
-		mux.HandleFunc("GET /sse", liveReloadHandler)
-		mux.Handle("GET /", injectReloadMiddleware(fileServer, sb.String()))
-		topHandler = noCacheMiddleware(mux)
-	} else {
-		mux.Handle("GET /", fileServer)
-		topHandler = mux
-	}
-
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           topHandler,
+		Handler:           handler,
 		ReadTimeout:       6 * time.Second,
 		ReadHeaderTimeout: 2 * time.Second,
 		WriteTimeout:      12 * time.Second,
