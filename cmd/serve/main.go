@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"runtime/debug"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"text/template"
@@ -60,48 +59,6 @@ func serverError(w http.ResponseWriter, err error) {
 	}
 
 	http.Error(w, body, http.StatusInternalServerError)
-}
-
-func noCacheMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		next.ServeHTTP(w, r)
-	})
-}
-
-func injectReloadMiddleware(next http.Handler, injection string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		bw := newBufferedResponseWriter(w)
-		defer func() {
-			if err := bw.customFlush(); err != nil {
-				serverError(w, err)
-			}
-		}()
-
-		next.ServeHTTP(bw, r)
-
-		if r.Header.Get("Range") != "" {
-			return
-		}
-		if !strings.Contains(bw.Header().Get("Content-Type"), HTMLContentType) {
-			return
-		}
-
-		htmlStr := strings.ReplaceAll(bw.buf.String(), "</body>", injection+"</body>")
-
-		if contentLength := bw.Header().Get("Content-Length"); contentLength != "" {
-			n, err := strconv.Atoi(contentLength)
-			if err != nil {
-				fmt.Printf("could not parse Content-Length value: %v\n", err)
-				os.Exit(1)
-			}
-			bw.Header().Set("Content-Length", strconv.Itoa(n+len(injection)))
-		}
-
-		if _, err := fmt.Fprint(bw, htmlStr); err != nil {
-			serverError(w, err)
-		}
-	})
 }
 
 func formatSSE(event, data string) string {
@@ -182,17 +139,20 @@ func main() {
 
 	rootFS := os.DirFS(dir)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	mux := http.NewServeMux()
 	fileServer := http.FileServerFS(rootFS)
 	var handler http.Handler
 
 	if injectReload {
-		mux.Handle("GET /", injectReloadMiddleware(fileServer, injection))
+		mux.Handle("GET /", withInjectReload(fileServer, injection))
 		mux.HandleFunc("GET /sse", liveReloadHandler)
-		handler = noCacheMiddleware(mux)
+		handler = withRecoverPanic(withRequestCancel(withNoCache(mux), ctx))
 	} else {
 		mux.Handle("GET /", fileServer)
-		handler = mux
+		handler = withRecoverPanic(withRequestCancel(mux, ctx))
 	}
 
 	var addr string
@@ -224,9 +184,6 @@ func main() {
 			os.Exit(1)
 		}
 	}()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	go func() {
 		if !injectReload {
@@ -265,8 +222,11 @@ func main() {
 			case <-ctx.Done():
 				return
 			case ev, ok := <-watcher.Events:
-				if !ok || (ev.Op&trackedOp == 0) {
+				if !ok {
 					return
+				}
+				if ev.Op&trackedOp == 0 {
+					continue
 				}
 				debounce.Call("reload", func() {
 					reloadBroadcaster.notify()
@@ -285,8 +245,8 @@ func main() {
 
 	fmt.Println("shutting down server...")
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
+	shutdownCtx, shutdownRelease := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownRelease()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		fmt.Printf("server shutdown failed: %v\n", err)
