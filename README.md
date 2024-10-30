@@ -28,9 +28,17 @@ More info: https://go.dev/wiki/GOPATH
 ## Usage
 
 ```bash
+serve path/to/directory
+```
+
+### Flags
+
+```bash
 Usage of serve:
   -expose
     	expose the server to all interfaces
   -port string
     	HTTP server port (default "8080")
+  -reload
+    	inject auto reload into HTML files
 ```
