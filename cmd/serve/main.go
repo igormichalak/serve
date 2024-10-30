@@ -10,17 +10,18 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"text/template"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 const DefaultPort = "8080"
 const HTMLContentType = "text/html"
-
-var reloadBroadcaster = newBroadcaster()
 
 const InjectionTmplString = `<script>
     const sse = new EventSource('http://localhost:{{.Port}}/sse');
@@ -42,6 +43,10 @@ var InjectionTmpl = template.Must(template.New("sse").Parse(InjectionTmplString)
 type InjectionParams struct {
 	Port string
 }
+
+var reloadBroadcaster = newBroadcaster()
+var ignoredDirs = []string{".git", ".idea", "node_modules"}
+var trackedOp = fsnotify.Create | fsnotify.Write | fsnotify.Remove | fsnotify.Rename
 
 func serverError(w http.ResponseWriter, err error) {
 	fmt.Printf("server error: %v\n", err)
@@ -173,8 +178,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	rootFS := os.DirFS(dir)
+
 	mux := http.NewServeMux()
-	fileServer := http.FileServerFS(os.DirFS(dir))
+	fileServer := http.FileServerFS(rootFS)
 	var handler http.Handler
 
 	if injectReload {
@@ -216,13 +223,67 @@ func main() {
 		}
 	}()
 
-	<-stopC
-	fmt.Println("shutting down server...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
+	go func() {
+		if !injectReload {
+			return
+		}
+		debounce := newDebouncer(100 * time.Millisecond)
+		watcher, err := fsnotify.NewWatcher()
+		if err != nil {
+			panic(err)
+		}
+		defer func() {
+			if err := watcher.Close(); err != nil {
+				panic(err)
+			}
+		}()
+		err = fs.WalkDir(rootFS, ".", func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() {
+				return nil
+			}
+			if d.IsDir() && slices.Contains(ignoredDirs, d.Name()) {
+				return fs.SkipDir
+			}
+			return watcher.Add(path)
+		})
+		if err != nil {
+			panic(err)
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-watcher.Events:
+				if !ok || (ev.Op&trackedOp == 0) {
+					return
+				}
+				debounce.Call("reload", func() {
+					reloadBroadcaster.notify()
+				})
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				fmt.Printf("watcher error: %v\n", err)
+			}
+		}
+	}()
+
+	<-stopC
+	cancel()
+
+	fmt.Println("shutting down server...")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
 		fmt.Printf("server shutdown failed: %v\n", err)
 		os.Exit(1)
 	}
