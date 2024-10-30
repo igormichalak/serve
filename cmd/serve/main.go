@@ -92,7 +92,8 @@ func injectReloadMiddleware(next http.Handler, injection string) http.Handler {
 		if contentLength := bw.Header().Get("Content-Length"); contentLength != "" {
 			n, err := strconv.Atoi(contentLength)
 			if err != nil {
-				panic(err)
+				fmt.Printf("could not parse Content-Length value: %v\n", err)
+				os.Exit(1)
 			}
 			bw.Header().Set("Content-Length", strconv.Itoa(n+len(injection)))
 		}
@@ -152,7 +153,8 @@ func main() {
 
 	var injectionSB strings.Builder
 	if err := InjectionTmpl.Execute(&injectionSB, InjectionParams{Port: port}); err != nil {
-		panic(err)
+		fmt.Printf("failed to execute injection template: %v\n", err)
+		os.Exit(1)
 	}
 	injection := injectionSB.String()
 
@@ -233,11 +235,13 @@ func main() {
 		debounce := newDebouncer(100 * time.Millisecond)
 		watcher, err := fsnotify.NewWatcher()
 		if err != nil {
-			panic(err)
+			fmt.Printf("failed to create a watcher: %v\n", err)
+			os.Exit(1)
 		}
 		defer func() {
 			if err := watcher.Close(); err != nil {
-				panic(err)
+				fmt.Printf("failed to stop a watcher: %v\n", err)
+				os.Exit(1)
 			}
 		}()
 		err = fs.WalkDir(rootFS, ".", func(path string, d fs.DirEntry, err error) error {
@@ -253,7 +257,8 @@ func main() {
 			return watcher.Add(path)
 		})
 		if err != nil {
-			panic(err)
+			fmt.Printf("error occured while trying to register the fs tree: %v\n", err)
+			os.Exit(1)
 		}
 		for {
 			select {
