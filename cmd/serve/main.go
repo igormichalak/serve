@@ -20,7 +20,6 @@ import (
 )
 
 const DefaultPort = "8080"
-const HTMLContentType = "text/html"
 
 const InjectionTmplString = `<script>
     const sse = new EventSource('http://localhost:{{.Port}}/sse');
@@ -83,6 +82,7 @@ func liveReloadHandler(w http.ResponseWriter, r *http.Request) {
 		case <-ch:
 			msg := formatSSE("sourcechange", "{}")
 			if _, err := fmt.Fprint(w, msg); err != nil {
+				fmt.Printf("sse error: %v\n", err)
 				return
 			}
 			flusher.Flush()
@@ -197,12 +197,12 @@ func main() {
 		debounce := newDebouncer(100 * time.Millisecond)
 		watcher, err := fsnotify.NewWatcher()
 		if err != nil {
-			fmt.Printf("failed to create a watcher: %v\n", err)
+			fmt.Printf("failed to create a file watcher: %v\n", err)
 			os.Exit(1)
 		}
 		defer func() {
 			if err := watcher.Close(); err != nil {
-				fmt.Printf("failed to stop a watcher: %v\n", err)
+				fmt.Printf("failed to stop a file watcher: %v\n", err)
 				os.Exit(1)
 			}
 		}()
@@ -213,7 +213,7 @@ func main() {
 			if !d.IsDir() {
 				return nil
 			}
-			if d.IsDir() && slices.Contains(ignoredDirs, d.Name()) {
+			if slices.Contains(ignoredDirs, d.Name()) {
 				return fs.SkipDir
 			}
 			return watcher.Add(path)

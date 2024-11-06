@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+const HTMLContentType = "text/html"
+
 func withRecoverPanic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
@@ -50,7 +52,7 @@ func withInjectReload(next http.Handler, injection string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bw := newBufferedResponseWriter(w)
 		defer func() {
-			if err := bw.customFlush(); err != nil {
+			if _, err := bw.bufferFlush(); err != nil {
 				serverError(w, err)
 			}
 		}()
@@ -64,7 +66,7 @@ func withInjectReload(next http.Handler, injection string) http.Handler {
 			return
 		}
 
-		htmlStr := strings.ReplaceAll(bw.buf.String(), "</body>", injection+"</body>")
+		htmlStr := strings.Replace(bw.buf.String(), "</body>", injection+"</body>", 1)
 
 		if contentLength := bw.Header().Get("Content-Length"); contentLength != "" {
 			n, err := strconv.Atoi(contentLength)

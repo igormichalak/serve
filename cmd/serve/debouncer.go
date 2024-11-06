@@ -22,8 +22,7 @@ func (d *debouncer) Call(key string, f func()) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	timer, ok := d.timers[key]
-	if ok {
+	if timer, ok := d.timers[key]; ok {
 		timer.Stop()
 	}
 	d.timers[key] = time.AfterFunc(d.after, f)

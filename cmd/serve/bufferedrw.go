@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 )
 
@@ -32,8 +33,7 @@ func (bw *bufferedResponseWriter) Flush() {
 	flusher.Flush()
 }
 
-func (bw *bufferedResponseWriter) customFlush() error {
+func (bw *bufferedResponseWriter) bufferFlush() (written int64, err error) {
 	bw.ResponseWriter.WriteHeader(bw.status)
-	_, err := bw.ResponseWriter.Write(bw.buf.Bytes())
-	return err
+	return io.Copy(bw.ResponseWriter, &bw.buf)
 }
