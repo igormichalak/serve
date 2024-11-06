@@ -172,6 +172,11 @@ func main() {
 		MaxHeaderBytes:    8_192,
 	}
 
+	if injectReload {
+		srv.WriteTimeout = -1
+		srv.IdleTimeout = -1
+	}
+
 	stopC := make(chan os.Signal, 1)
 	signal.Notify(stopC, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 
