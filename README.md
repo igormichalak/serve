@@ -10,7 +10,7 @@ Prerequisites:
 Install **serve** from source:
 
 ```bash
-go install github.com/igormichalak/serve/cmd/serve@v1.0.0
+go install github.com/igormichalak/serve/cmd/serve@v1.0.1
 ```
 
 If the `serve` command can't be found, make sure that the `$GOBIN` (or `$GOPATH/bin`) directory is added to your system PATH.
